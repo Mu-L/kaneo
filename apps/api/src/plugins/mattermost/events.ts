@@ -35,9 +35,9 @@ function isEnabled(config: MattermostConfig, key: MattermostEventKey): boolean {
 
 function escapeText(text: string): string {
   return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function toSentenceCase(value: string | null): string {
