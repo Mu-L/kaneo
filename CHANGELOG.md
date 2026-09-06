@@ -1,3 +1,7 @@
+### Bug Fixes
+
+- **web:** use location.href for the sign-in redirect param: [7483d37](https://github.com/usekaneo/kaneo/commit/7483d37ea059a76f298cbd66cb3eb9903e0ce44f)
+
 ### Features
 
 - **mattermost:** add native Mattermost integration: #1325
