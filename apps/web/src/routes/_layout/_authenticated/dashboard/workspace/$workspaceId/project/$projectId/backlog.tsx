@@ -22,7 +22,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
-import labelColors from "@/constants/label-colors";
 import { shortcuts } from "@/constants/shortcuts";
 import { useUpdateTask } from "@/hooks/mutations/task/use-update-task";
 import useGetLabelsByWorkspace from "@/hooks/queries/label/use-get-labels-by-workspace";
@@ -30,7 +29,9 @@ import { useGetTasks } from "@/hooks/queries/task/use-get-tasks";
 import { useGetActiveWorkspaceUsers } from "@/hooks/queries/workspace-users/use-get-active-workspace-users";
 import { useRegisterShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { DUE_DATE_FILTER_VALUES } from "@/hooks/use-task-filters";
+import { getInitials } from "@/lib/get-initials";
 import { getPriorityLabel } from "@/lib/i18n/domain";
+import { resolveLabelColor } from "@/lib/label-color";
 import { getPriorityIcon } from "@/lib/priority";
 import type { SortConfig } from "@/lib/sort-tasks";
 import { sortTasks } from "@/lib/sort-tasks";
@@ -94,6 +95,12 @@ function RouteComponent() {
           setViewMode("list");
           navigate({
             to: "/dashboard/workspace/$workspaceId/project/$projectId/board",
+            params: { workspaceId, projectId },
+          });
+        },
+        [shortcuts.view.calendar]: () => {
+          navigate({
+            to: "/dashboard/workspace/$workspaceId/project/$projectId/calendar",
             params: { workspaceId, projectId },
           });
         },
@@ -329,7 +336,8 @@ function RouteComponent() {
     }
 
     const updatedProject = produce(project, (draft) => {
-      const todoColumn = draft.columns?.find((col) => col.id === "to-do");
+      // "to-do" is a column slug, so it can only be matched against slug.
+      const todoColumn = draft.columns?.find((col) => col.slug === "to-do");
       if (todoColumn && draft.plannedTasks) {
         todoColumn.tasks.push(
           ...draft.plannedTasks.map((task) => ({
@@ -493,9 +501,7 @@ function RouteComponent() {
                         <span
                           className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                           style={{
-                            backgroundColor:
-                              labelColors.find((c) => c.value === label.color)
-                                ?.color || "var(--color-neutral-400)",
+                            backgroundColor: resolveLabelColor(label.color),
                           }}
                         />
                         <span>
@@ -598,7 +604,7 @@ function RouteComponent() {
                             alt={member.user?.name || ""}
                           />
                           <AvatarFallback className="text-xs font-medium border border-border/30">
-                            {member.user?.name?.charAt(0).toUpperCase()}
+                            {getInitials(member.user?.name)}
                           </AvatarFallback>
                         </Avatar>
                         <span>{member.user?.name}</span>
@@ -659,10 +665,7 @@ function RouteComponent() {
                             <span
                               className="w-3 h-3 rounded-full flex-shrink-0"
                               style={{
-                                backgroundColor:
-                                  labelColors.find(
-                                    (c) => c.value === label.color,
-                                  )?.color || "var(--color-neutral-400)",
+                                backgroundColor: resolveLabelColor(label.color),
                               }}
                             />
                             <span className="max-w-20 truncate">

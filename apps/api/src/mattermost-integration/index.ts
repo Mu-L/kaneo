@@ -1,31 +1,25 @@
 import { and, eq } from "drizzle-orm";
-import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { describeRoute, resolver, validator } from "hono-openapi";
-import * as v from "valibot";
 import db from "../database";
 import { integrationTable } from "../database/schema";
+import { deletedSchema, projectIdParam } from "../integrations/schema";
+import {
+  apiRouter,
+  type BaseVariables,
+  createRoute,
+  errorResponse,
+  jsonResponse,
+} from "../openapi";
 import {
   defaultMattermostEvents,
   type MattermostConfig,
   normalizeMattermostConfig,
   validateMattermostConfig,
 } from "../plugins/mattermost/config";
-import { mattermostIntegrationSchema } from "../schemas";
 import { requireWorkspacePermission } from "../utils/require-workspace-permission";
 import { workspaceAccess } from "../utils/workspace-access-middleware";
-
-const mattermostIntegration = new Hono<{
-  Variables: {
-    userId: string;
-    workspaceId: string;
-    apiKey?: {
-      id: string;
-      userId: string;
-      enabled: boolean;
-    };
-  };
-}>();
+import { mattermostIntegrationSchema } from "./response";
+import { createMattermostBody, updateMattermostBody } from "./schema";
 
 function maskWebhookUrl(value: string): string {
   try {
@@ -83,256 +77,241 @@ async function getMattermostIntegration(projectId: string) {
   return toResponse(integration);
 }
 
-const nullableMattermostIntegrationSchema = v.nullable(
-  mattermostIntegrationSchema,
-);
+const manageAccess = [
+  workspaceAccess.fromProject("projectId"),
+  requireWorkspacePermission({ workspace: ["manage_settings"] }),
+];
 
-mattermostIntegration
-  .get(
-    "/project/:projectId",
-    describeRoute({
-      operationId: "getMattermostIntegration",
-      tags: ["Mattermost"],
-      description: "Get Mattermost integration for a project",
-      responses: {
-        200: {
-          description: "Mattermost integration details",
-          content: {
-            "application/json": {
-              schema: resolver(nullableMattermostIntegrationSchema),
-            },
-          },
-        },
-      },
-    }),
-    validator("param", v.object({ projectId: v.string() })),
-    workspaceAccess.fromProject("projectId"),
-    async (c) => {
-      const { projectId } = c.req.valid("param");
-      const integration = await getMattermostIntegration(projectId);
-      return c.json(integration);
-    },
-  )
-  .post(
-    "/project/:projectId",
-    describeRoute({
-      operationId: "createMattermostIntegration",
-      tags: ["Mattermost"],
-      description: "Create or replace a Mattermost integration for a project",
-      responses: {
-        200: {
-          description: "Mattermost integration created successfully",
-          content: {
-            "application/json": {
-              schema: resolver(mattermostIntegrationSchema),
-            },
-          },
-        },
-      },
-    }),
-    validator("param", v.object({ projectId: v.string() })),
-    validator(
-      "json",
-      v.object({
-        webhookUrl: v.pipe(v.string(), v.minLength(1)),
-        channelName: v.optional(v.string()),
-        events: v.optional(
-          v.object({
-            taskCreated: v.optional(v.boolean()),
-            taskStatusChanged: v.optional(v.boolean()),
-            taskPriorityChanged: v.optional(v.boolean()),
-            taskTitleChanged: v.optional(v.boolean()),
-            taskDescriptionChanged: v.optional(v.boolean()),
-            taskCommentCreated: v.optional(v.boolean()),
-          }),
-        ),
-      }),
+const getMattermostIntegrationRoute = createRoute({
+  method: "get",
+  operationId: "getMattermostIntegration",
+  path: "/project/{projectId}",
+  tags: ["Mattermost"],
+  summary: "Get Mattermost integration",
+  description:
+    "Get the Mattermost integration for a project, or null when none is configured.",
+  middleware: [workspaceAccess.fromProject("projectId")] as const,
+  request: { params: projectIdParam },
+  responses: {
+    200: jsonResponse(
+      "Mattermost integration details, or null",
+      mattermostIntegrationSchema.nullable(),
     ),
-    workspaceAccess.fromProject("projectId"),
-    requireWorkspacePermission({ workspace: ["manage_settings"] }),
-    async (c) => {
-      const { projectId } = c.req.valid("param");
-      const body = c.req.valid("json");
-
-      const config = normalizeMattermostConfig({
-        webhookUrl: body.webhookUrl,
-        channelName: body.channelName,
-        events: body.events,
-      });
-
-      const validation = await validateMattermostConfig(config);
-      if (!validation.valid) {
-        throw new HTTPException(400, {
-          message: validation.errors?.join(", ") ?? "Invalid config",
-        });
-      }
-
-      const existing = await db.query.integrationTable.findFirst({
-        where: and(
-          eq(integrationTable.projectId, projectId),
-          eq(integrationTable.type, "mattermost"),
-        ),
-      });
-
-      if (existing) {
-        await db
-          .update(integrationTable)
-          .set({
-            config: JSON.stringify(config),
-            isActive: true,
-            updatedAt: new Date(),
-          })
-          .where(eq(integrationTable.id, existing.id));
-      } else {
-        await db.insert(integrationTable).values({
-          projectId,
-          type: "mattermost",
-          config: JSON.stringify(config),
-          isActive: true,
-        });
-      }
-
-      const integration = await getMattermostIntegration(projectId);
-      return c.json(integration);
-    },
-  )
-  .patch(
-    "/project/:projectId",
-    describeRoute({
-      operationId: "updateMattermostIntegration",
-      tags: ["Mattermost"],
-      description: "Update Mattermost integration settings",
-      responses: {
-        200: {
-          description: "Mattermost integration updated successfully",
-          content: {
-            "application/json": {
-              schema: resolver(mattermostIntegrationSchema),
-            },
-          },
-        },
-      },
-    }),
-    validator("param", v.object({ projectId: v.string() })),
-    validator(
-      "json",
-      v.object({
-        webhookUrl: v.optional(v.string()),
-        channelName: v.optional(v.nullable(v.string())),
-        isActive: v.optional(v.boolean()),
-        events: v.optional(
-          v.object({
-            taskCreated: v.optional(v.boolean()),
-            taskStatusChanged: v.optional(v.boolean()),
-            taskPriorityChanged: v.optional(v.boolean()),
-            taskTitleChanged: v.optional(v.boolean()),
-            taskDescriptionChanged: v.optional(v.boolean()),
-            taskCommentCreated: v.optional(v.boolean()),
-          }),
-        ),
-      }),
+    400: errorResponse(
+      "Unknown project, or its workspace could not be determined",
     ),
-    workspaceAccess.fromProject("projectId"),
-    requireWorkspacePermission({ workspace: ["manage_settings"] }),
-    async (c) => {
-      const { projectId } = c.req.valid("param");
-      const body = c.req.valid("json");
+    403: errorResponse("No access to the project's workspace"),
+  },
+});
 
-      const existing = await db.query.integrationTable.findFirst({
-        where: and(
-          eq(integrationTable.projectId, projectId),
-          eq(integrationTable.type, "mattermost"),
-        ),
+const createMattermostIntegrationRoute = createRoute({
+  method: "post",
+  operationId: "createMattermostIntegration",
+  path: "/project/{projectId}",
+  tags: ["Mattermost"],
+  summary: "Create Mattermost integration",
+  description:
+    "Create or replace the Mattermost integration for a project. The webhook URL must use HTTPS and pass destination validation; delivery failures surface later.",
+  middleware: manageAccess,
+  request: {
+    params: projectIdParam,
+    body: {
+      required: true,
+      content: { "application/json": { schema: createMattermostBody } },
+    },
+  },
+  responses: {
+    200: jsonResponse(
+      "The stored integration",
+      mattermostIntegrationSchema.nullable(),
+    ),
+    400: errorResponse("The webhook URL failed validation"),
+    403: errorResponse(
+      "No workspace access, or missing workspace:manage_settings",
+    ),
+  },
+});
+
+const updateMattermostIntegrationRoute = createRoute({
+  method: "patch",
+  operationId: "updateMattermostIntegration",
+  path: "/project/{projectId}",
+  tags: ["Mattermost"],
+  summary: "Update Mattermost integration",
+  description:
+    "Update the Mattermost integration. Omitted fields keep their current value, and event toggles are merged into the existing set.",
+  middleware: manageAccess,
+  request: {
+    params: projectIdParam,
+    body: {
+      required: true,
+      content: { "application/json": { schema: updateMattermostBody } },
+    },
+  },
+  responses: {
+    200: jsonResponse(
+      "The updated integration",
+      mattermostIntegrationSchema.nullable(),
+    ),
+    400: errorResponse("The resulting config failed validation"),
+    403: errorResponse(
+      "No workspace access, or missing workspace:manage_settings",
+    ),
+    404: errorResponse("Mattermost integration not found"),
+  },
+});
+
+const deleteMattermostIntegrationRoute = createRoute({
+  method: "delete",
+  operationId: "deleteMattermostIntegration",
+  path: "/project/{projectId}",
+  tags: ["Mattermost"],
+  summary: "Delete Mattermost integration",
+  description: "Remove the Mattermost integration from a project.",
+  middleware: manageAccess,
+  request: { params: projectIdParam },
+  responses: {
+    200: jsonResponse("The integration was removed", deletedSchema),
+    400: errorResponse(
+      "Unknown project, or its workspace could not be determined",
+    ),
+    403: errorResponse(
+      "No workspace access, or missing workspace:manage_settings",
+    ),
+    404: errorResponse("Mattermost integration not found"),
+  },
+});
+
+const mattermostIntegration = apiRouter<
+  BaseVariables & { workspaceId: string }
+>()
+  .openapi(getMattermostIntegrationRoute, async (c) => {
+    const { projectId } = c.req.valid("param");
+    const integration = await getMattermostIntegration(projectId);
+    return c.json(integration, 200);
+  })
+  .openapi(createMattermostIntegrationRoute, async (c) => {
+    const { projectId } = c.req.valid("param");
+    const body = c.req.valid("json");
+
+    const config = normalizeMattermostConfig({
+      webhookUrl: body.webhookUrl,
+      channelName: body.channelName,
+      events: body.events,
+    });
+
+    const validation = await validateMattermostConfig(config);
+    if (!validation.valid) {
+      throw new HTTPException(400, {
+        message: validation.errors?.join(", ") ?? "Invalid config",
       });
+    }
 
-      if (!existing) {
-        throw new HTTPException(404, {
-          message: "Mattermost integration not found",
-        });
-      }
+    const existing = await db.query.integrationTable.findFirst({
+      where: and(
+        eq(integrationTable.projectId, projectId),
+        eq(integrationTable.type, "mattermost"),
+      ),
+    });
 
-      const currentConfig = normalizeMattermostConfig(
-        JSON.parse(existing.config) as MattermostConfig,
-      );
-      const nextConfig = normalizeMattermostConfig({
-        webhookUrl:
-          body.webhookUrl === undefined
-            ? currentConfig.webhookUrl
-            : body.webhookUrl.trim(),
-        channelName:
-          body.channelName === undefined
-            ? currentConfig.channelName
-            : (body.channelName ?? undefined),
-        events: {
-          ...(currentConfig.events ?? {}),
-          ...(body.events ?? {}),
-        },
-      });
-
-      const validation = await validateMattermostConfig(nextConfig);
-      if (!validation.valid) {
-        throw new HTTPException(400, {
-          message: validation.errors?.join(", ") ?? "Invalid config",
-        });
-      }
-
+    if (existing) {
       await db
         .update(integrationTable)
         .set({
-          config: JSON.stringify(nextConfig),
-          isActive:
-            body.isActive !== undefined
-              ? body.isActive
-              : (existing.isActive ?? true),
+          config: JSON.stringify(config),
+          isActive: true,
           updatedAt: new Date(),
         })
         .where(eq(integrationTable.id, existing.id));
-
-      const integration = await getMattermostIntegration(projectId);
-      return c.json(integration);
-    },
-  )
-  .delete(
-    "/project/:projectId",
-    describeRoute({
-      operationId: "deleteMattermostIntegration",
-      tags: ["Mattermost"],
-      description: "Delete Mattermost integration for a project",
-      responses: {
-        200: {
-          description: "Mattermost integration deleted successfully",
-          content: {
-            "application/json": {
-              schema: resolver(v.object({ success: v.boolean() })),
-            },
-          },
-        },
-      },
-    }),
-    validator("param", v.object({ projectId: v.string() })),
-    workspaceAccess.fromProject("projectId"),
-    requireWorkspacePermission({ workspace: ["manage_settings"] }),
-    async (c) => {
-      const { projectId } = c.req.valid("param");
-
-      const existing = await db.query.integrationTable.findFirst({
-        where: and(
-          eq(integrationTable.projectId, projectId),
-          eq(integrationTable.type, "mattermost"),
-        ),
+    } else {
+      await db.insert(integrationTable).values({
+        projectId,
+        type: "mattermost",
+        config: JSON.stringify(config),
+        isActive: true,
       });
+    }
 
-      if (!existing) {
-        throw new HTTPException(404, {
-          message: "Mattermost integration not found",
-        });
-      }
+    const integration = await getMattermostIntegration(projectId);
+    return c.json(integration, 200);
+  })
+  .openapi(updateMattermostIntegrationRoute, async (c) => {
+    const { projectId } = c.req.valid("param");
+    const body = c.req.valid("json");
 
-      await db
-        .delete(integrationTable)
-        .where(eq(integrationTable.id, existing.id));
-      return c.json({ success: true });
-    },
-  );
+    const existing = await db.query.integrationTable.findFirst({
+      where: and(
+        eq(integrationTable.projectId, projectId),
+        eq(integrationTable.type, "mattermost"),
+      ),
+    });
+
+    if (!existing) {
+      throw new HTTPException(404, {
+        message: "Mattermost integration not found",
+      });
+    }
+
+    const currentConfig = normalizeMattermostConfig(
+      JSON.parse(existing.config) as MattermostConfig,
+    );
+    const nextConfig = normalizeMattermostConfig({
+      webhookUrl:
+        body.webhookUrl === undefined
+          ? currentConfig.webhookUrl
+          : body.webhookUrl.trim(),
+      channelName:
+        body.channelName === undefined
+          ? currentConfig.channelName
+          : (body.channelName ?? undefined),
+      events: {
+        ...(currentConfig.events ?? {}),
+        ...(body.events ?? {}),
+      },
+    });
+
+    const validation = await validateMattermostConfig(nextConfig);
+    if (!validation.valid) {
+      throw new HTTPException(400, {
+        message: validation.errors?.join(", ") ?? "Invalid config",
+      });
+    }
+
+    await db
+      .update(integrationTable)
+      .set({
+        config: JSON.stringify(nextConfig),
+        isActive:
+          body.isActive !== undefined
+            ? body.isActive
+            : (existing.isActive ?? true),
+        updatedAt: new Date(),
+      })
+      .where(eq(integrationTable.id, existing.id));
+
+    const integration = await getMattermostIntegration(projectId);
+    return c.json(integration, 200);
+  })
+  .openapi(deleteMattermostIntegrationRoute, async (c) => {
+    const { projectId } = c.req.valid("param");
+
+    const existing = await db.query.integrationTable.findFirst({
+      where: and(
+        eq(integrationTable.projectId, projectId),
+        eq(integrationTable.type, "mattermost"),
+      ),
+    });
+
+    if (!existing) {
+      throw new HTTPException(404, {
+        message: "Mattermost integration not found",
+      });
+    }
+
+    await db
+      .delete(integrationTable)
+      .where(eq(integrationTable.id, existing.id));
+    return c.json({ success: true }, 200);
+  });
 
 export default mattermostIntegration;
